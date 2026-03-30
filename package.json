@@ -1,6 +1,6 @@
 {
   "name": "com.unimuse.avatar-aligner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Avatar Aligner",
   "description": "A tool to align VRChat avatars at equal intervals in the Unity Editor.",
   "unity": "2022.3",
