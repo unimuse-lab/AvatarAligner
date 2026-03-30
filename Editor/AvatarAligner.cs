@@ -1,251 +1,274 @@
-#if UNITY_EDITOR
 using UnityEngine;
 using UnityEditor;
-using System.Linq;
 using System.Collections.Generic;
-using UnityEngine.SceneManagement;
-using System.IO;
+using System.Linq;
 
-// VRChatのアバターコンポーネントを認識するために必要
 #if VRC_SDK_VRCSDK3
 using VRC.SDK3.Avatars.Components;
 #endif
 
-namespace UniMuseLab.AvatarAligner
+namespace UniMuse.Lab
 {
-    /// <summary>
-    /// AvatarAlignerの設定値を保持するScriptableObject
-    /// </summary>
-    public class AvatarAlignerData : ScriptableObject
-    {
-        public float spacingInterval = 1.0f;
-        public AvatarAligner.Direction modeDirection = AvatarAligner.Direction.Positive;
-        public AvatarAligner.SortTarget modeSort = AvatarAligner.SortTarget.HierarchyOrder;
-        public AvatarAligner.AlignmentBase modeBase = AvatarAligner.AlignmentBase.FirstObject;
-        public float customStartX = 0.0f;
-    }
-
-    /// <summary>
-    /// VRChatアバターを等間隔に整列させるエディタウィンドウ
-    /// </summary>
     public class AvatarAligner : EditorWindow
     {
-        public AvatarAlignerData data;
+        // 設定用変数
+        private float interval = 1.0f;
+        private int maxPerRow = 0; // 0は無限
+        private float zInterval = 1.5f;
+        private bool usePushOut = true;
 
-        // 保存先パスの定義（BookmarkerWindow.cs の仕様に準拠）
-        private const string SAVE_ROOT = "Assets/UniMuseData";
-        private const string SAVE_FOLDER = "AvatarAligner";
-        private const string DATA_FILE_NAME = "AvatarAlignerData.asset";
+        private enum Direction { Right, Left }
+        private Direction alignDirection = Direction.Right;
 
-        public enum Direction
+        private enum AlignMode { SimpleGrid, ZGroupSort }
+        private AlignMode currentMode = AlignMode.SimpleGrid;
+
+        private Vector2 scrollPos;
+        private List<ZGroup> zGroups = new List<ZGroup>();
+
+        // Z軸グループ管理用クラス
+        private class ZGroup
         {
-            Positive, // 正方向 (+X) ※ユーザー指定の「左側（正）」に相当
-            Negative  // 負方向 (-X) ※ユーザー指定の「右側（負）」に相当
-        }
-
-        public enum SortTarget
-        {
-            HierarchyOrder, // ヒエラルキーの並び順を優先して並べる
-            PositionOrder   // 現在の位置（一番端からの距離）を優先して並べる
-        }
-
-        public enum AlignmentBase
-        {
-            FirstObject, // 1体目のアバターの現在位置を基準にする
-            WorldZero,   // ワールドの原点 (X = 0.0) を基準にする
-            CustomX      // 指定した任意のX座標を基準にする
+            public float zPosition;
+            public bool isSelected = true;
+            public List<GameObject> members = new List<GameObject>();
         }
 
         [MenuItem("UniMuse.lab/Avatar Aligner")]
         public static void ShowWindow()
         {
-            var window = GetWindow<AvatarAligner>();
-            window.titleContent = new GUIContent("Avatar Aligner");
-            window.Show();
-        }
-
-        private void OnEnable()
-        {
-            data = LoadOrCreateData();
-        }
-
-        /// <summary>
-        /// 指定されたパスにデータを読み込むか、存在しない場合は作成する
-        /// </summary>
-        public AvatarAlignerData LoadOrCreateData()
-        {
-            string folderPath = Path.Combine(SAVE_ROOT, SAVE_FOLDER).Replace("\\", "/");
-            string filePath = Path.Combine(folderPath, DATA_FILE_NAME).Replace("\\", "/");
-
-            var loadedData = AssetDatabase.LoadAssetAtPath<AvatarAlignerData>(filePath);
-
-            if (loadedData == null)
-            {
-                // UniMuseData ルートフォルダの作成
-                if (!AssetDatabase.IsValidFolder(SAVE_ROOT))
-                {
-                    AssetDatabase.CreateFolder("Assets", "UniMuseData");
-                }
-                // AvatarAligner 個別フォルダの作成
-                if (!AssetDatabase.IsValidFolder(folderPath))
-                {
-                    AssetDatabase.CreateFolder(SAVE_ROOT, SAVE_FOLDER);
-                }
-
-                loadedData = ScriptableObject.CreateInstance<AvatarAlignerData>();
-                AssetDatabase.CreateAsset(loadedData, filePath);
-                AssetDatabase.SaveAssets();
-            }
-            return loadedData;
+            GetWindow<AvatarAligner>("Avatar Aligner");
         }
 
         private void OnGUI()
         {
-            if (data == null) { data = LoadOrCreateData(); }
+            scrollPos = EditorGUILayout.BeginScrollView(scrollPos);
 
-            GUILayout.Label("VRChatアバター等間隔整列ツール", EditorStyles.boldLabel);
+            GUILayout.Label("Avatar Aligner - アバター整列ツール", EditorStyles.boldLabel);
             EditorGUILayout.Space();
 
-            EditorGUI.BeginChangeCheck();
-
-            data.spacingInterval = EditorGUILayout.FloatField("間隔 (Interval)", data.spacingInterval);
-            data.modeDirection = (Direction)EditorGUILayout.EnumPopup("並べる方向", data.modeDirection);
-            data.modeSort = (SortTarget)EditorGUILayout.EnumPopup("並び順の基準", data.modeSort);
-            data.modeBase = (AlignmentBase)EditorGUILayout.EnumPopup("開始位置の基準", data.modeBase);
-
-            if (data.modeBase == AlignmentBase.CustomX)
-            {
-                EditorGUI.indentLevel++;
-                data.customStartX = EditorGUILayout.FloatField("開始X座標", data.customStartX);
-                EditorGUI.indentLevel--;
-            }
-
-            // 設定が変更されたら保存する
-            if (EditorGUI.EndChangeCheck())
-            {
-                EditorUtility.SetDirty(data);
-                AssetDatabase.SaveAssets();
-            }
+            // 基本設定セクション
+            EditorGUILayout.BeginVertical("box");
+            GUILayout.Label("基本設定", EditorStyles.boldLabel);
+            interval = EditorGUILayout.FloatField("個体間の間隔 (X)", interval);
+            alignDirection = (Direction)EditorGUILayout.EnumPopup("整列する方向", alignDirection);
+            usePushOut = EditorGUILayout.Toggle("後ろのアバターを押し出す", usePushOut);
+            EditorGUILayout.EndVertical();
 
             EditorGUILayout.Space();
 
-            if (GUILayout.Button("整列を実行"))
-            {
-                ExecuteAlignment();
-            }
+            // モード選択セクション
+            EditorGUILayout.BeginVertical("box");
+            GUILayout.Label("整列モード設定", EditorStyles.boldLabel);
+            currentMode = (AlignMode)EditorGUILayout.EnumPopup("モード選択", currentMode);
 
-            EditorGUILayout.Space();
-            EditorGUILayout.HelpBox(
-                "【仕様】\n" +
-                "・選択中、またはヒエラルキー上の「VRC_AvatarDescriptor」を持つオブジェクトのみを整列対象にします。\n\n" +
-                "【並べる方向について】\n" +
-                "・Positive: 正方向 (+X) に並べます。※「左側（正）」に相当します。\n" +
-                "・Negative: 負方向 (-X) に並べます。※「右側（負）」に相当します。\n\n" +
-                "【並び順について】\n" +
-                "・HierarchyOrder: ヒエラルキーの上のアバターから順に並べます。\n" +
-                "・PositionOrder: X座標が端にあるアバターから順に並べます。同値ならヒエラルキー順です。\n\n" +
-                "【開始位置について】\n" +
-                "・FirstObject: リストの1体目の現在位置を起点にします。\n" +
-                "・WorldZero: X座標の 0.0 を起点にします。\n" +
-                "・CustomX: 指定した任意のX座標を起点にします。",
-                MessageType.Info);
-        }
-
-        private void ExecuteAlignment()
-        {
-            // 1. 対象オブジェクトの取得とフィルタリング
-            List<GameObject> allPotentialTargets = new List<GameObject>();
-            if (Selection.gameObjects.Length > 0)
+            if (currentMode == AlignMode.SimpleGrid)
             {
-                allPotentialTargets = Selection.gameObjects.ToList();
+                maxPerRow = EditorGUILayout.IntField("1列の最大数 (0で無効)", maxPerRow);
+                if (maxPerRow > 0)
+                {
+                    zInterval = EditorGUILayout.FloatField("列の間隔 (Z)", zInterval);
+                }
             }
             else
             {
-                Scene activeScene = SceneManager.GetActiveScene();
-                allPotentialTargets = activeScene.GetRootGameObjects().ToList();
-            }
-
-            List<GameObject> targets = allPotentialTargets.Where(g => IsAvatar(g)).ToList();
-
-            if (targets.Count < 2)
-            {
-                Debug.LogWarning("[Avatar Aligner] 整列対象のアバターが2つ以上見つかりませんでした。");
-                return;
-            }
-
-            // 2. ヒエラルキーの完全な順番を取得
-            List<GameObject> allHierarchyObjects = new List<GameObject>();
-            foreach (GameObject root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                AddChildrenRecursive(root, allHierarchyObjects);
-            }
-
-            // 3. 指定されたモードに従ってソート
-            if (data.modeSort == SortTarget.HierarchyOrder)
-            {
-                targets = targets.OrderBy(g => allHierarchyObjects.IndexOf(g)).ToList();
-            }
-            else if (data.modeSort == SortTarget.PositionOrder)
-            {
-                if (data.modeDirection == Direction.Positive)
+                if (GUILayout.Button("シーン内のZ軸グループをスキャン"))
                 {
-                    targets = targets.OrderBy(g => g.transform.position.x)
-                                     .ThenBy(g => allHierarchyObjects.IndexOf(g))
-                                     .ToList();
+                    ScanZGroups();
+                }
+
+                if (zGroups.Count > 0)
+                {
+                    EditorGUILayout.Space();
+                    GUILayout.Label("整列対象にする列を選択:", EditorStyles.miniLabel);
+                    foreach (var group in zGroups)
+                    {
+                        group.isSelected = EditorGUILayout.Toggle($"列 (Z座標: {group.zPosition:F2}) - {group.members.Count}体", group.isSelected);
+                    }
                 }
                 else
                 {
-                    targets = targets.OrderByDescending(g => g.transform.position.x)
-                                     .ThenBy(g => allHierarchyObjects.IndexOf(g))
-                                     .ToList();
+                    EditorGUILayout.HelpBox("スキャンボタンを押してZ軸の列を特定してください。", MessageType.Info);
+                }
+            }
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.Space();
+
+            // 実行ボタン
+            GUI.backgroundColor = Color.cyan;
+            if (GUILayout.Button("整列を実行する", GUILayout.Height(40)))
+            {
+                ExecuteAlign();
+            }
+            GUI.backgroundColor = Color.white;
+
+            EditorGUILayout.EndScrollView();
+        }
+
+        private void ScanZGroups()
+        {
+            zGroups.Clear();
+            var allAvatars = FindAllAvatars();
+
+            foreach (var avatar in allAvatars)
+            {
+                float z = avatar.transform.position.z;
+                var group = zGroups.Find(g => Mathf.Abs(g.zPosition - z) < 0.5f);
+                if (group == null)
+                {
+                    group = new ZGroup { zPosition = z };
+                    zGroups.Add(group);
+                }
+                group.members.Add(avatar);
+            }
+            zGroups = zGroups.OrderBy(g => g.zPosition).ToList();
+        }
+
+        private void ExecuteAlign()
+        {
+            List<GameObject> targets = new List<GameObject>();
+            bool isSelectionMode = Selection.gameObjects.Length > 0;
+
+            if (isSelectionMode)
+            {
+                // 選択中アバターのみを対象にする
+                foreach (var obj in Selection.gameObjects)
+                {
+                    if (IsAvatar(obj)) targets.Add(obj);
+                }
+            }
+            else
+            {
+                // モードに応じて全体を対象にする
+                if (currentMode == AlignMode.SimpleGrid)
+                {
+                    targets = FindAllAvatars();
+                }
+                else
+                {
+                    foreach (var group in zGroups)
+                    {
+                        if (group.isSelected) targets.AddRange(group.members);
+                    }
                 }
             }
 
-            // 4. アンドゥ処理の登録
-            Undo.RecordObjects(targets.Select(g => g.transform).ToArray(), "Align Avatars X");
-
-            // 5. 開始位置（X座標）の決定
-            float startX = 0f;
-            switch (data.modeBase)
+            if (targets.Count == 0)
             {
-                case AlignmentBase.FirstObject:
-                    startX = targets[0].transform.position.x;
-                    break;
-                case AlignmentBase.WorldZero:
-                    startX = 0.0f;
-                    break;
-                case AlignmentBase.CustomX:
-                    startX = data.customStartX;
-                    break;
+                Debug.LogWarning("[Avatar Aligner] 対象のアバターが見つかりませんでした。");
+                return;
             }
 
-            // 6. 整列処理
-            float directionMultiplier = (data.modeDirection == Direction.Positive) ? 1.0f : -1.0f;
+            // 選択解除（競合回避のため）
+            var savedSelection = Selection.objects;
+            Selection.objects = new Object[0];
+
+            Undo.IncrementCurrentGroup();
+            Undo.SetCurrentGroupName("Avatar Align");
+            int undoGroup = Undo.GetCurrentGroup();
+
+            // 整列ロジックの開始
+            // 基準点：ターゲットの中で最も進行方向とは逆端にあるアバターの座標
+            targets = targets.OrderBy(a => a.transform.position.x).ToList();
+            if (alignDirection == Direction.Left) targets.Reverse();
+
+            float startX = targets[0].transform.position.x;
+            float startZ = targets[0].transform.position.z;
 
             for (int i = 0; i < targets.Count; i++)
             {
-                Vector3 newPos = targets[i].transform.position;
-                newPos.x = startX + (data.spacingInterval * i * directionMultiplier);
-                targets[i].transform.position = newPos;
+                Undo.RecordObject(targets[i].transform, "Align Avatar");
+
+                float xPos, zPos;
+                if (currentMode == AlignMode.SimpleGrid && maxPerRow > 0)
+                {
+                    int row = i / maxPerRow;
+                    int col = i % maxPerRow;
+                    xPos = startX + (col * interval * (alignDirection == Direction.Right ? 1 : -1));
+                    zPos = startZ + (row * zInterval);
+                }
+                else
+                {
+                    xPos = startX + (i * interval * (alignDirection == Direction.Right ? 1 : -1));
+                    zPos = targets[i].transform.position.z; // ZGroupモード時は元のZを維持
+                }
+
+                targets[i].transform.position = new Vector3(xPos, targets[i].transform.position.y, zPos);
             }
 
+            // 押し出しロジック
+            if (usePushOut)
+            {
+                PushOutNonSelected(targets, alignDirection);
+            }
+
+            Undo.CollapseUndoOperations(undoGroup);
+            Selection.objects = savedSelection; // 選択状態を戻す
             Debug.Log($"[Avatar Aligner] {targets.Count}体のアバターを整列しました。");
         }
 
-        private bool IsAvatar(GameObject go)
+        private void PushOutNonSelected(List<GameObject> sortedTargets, Direction dir)
         {
-            return go.GetComponent("VRC_AvatarDescriptor") != null ||
-                   go.GetComponent("VRCAvatarDescriptor") != null;
+            float lastX = sortedTargets[sortedTargets.Count - 1].transform.position.x;
+            var allAvatars = FindAllAvatars();
+            
+            foreach (var other in allAvatars)
+            {
+                if (sortedTargets.Contains(other)) continue;
+
+                bool isAhead = (dir == Direction.Right) ? 
+                    (other.transform.position.x > lastX - interval * 0.1f) : 
+                    (other.transform.position.x < lastX + interval * 0.1f);
+
+                // Z軸も近い場合のみ押し出す（同じ列とみなす）
+                bool isSameZ = false;
+                foreach(var t in sortedTargets) {
+                    if (Mathf.Abs(t.transform.position.z - other.transform.position.z) < 0.5f) {
+                        isSameZ = true;
+                        break;
+                    }
+                }
+
+                if (isAhead && isSameZ)
+                {
+                    Undo.RecordObject(other.transform, "Push Out Avatar");
+                    float pushDist = interval; // 最低でも1間隔分は離す
+                    float newX = lastX + (pushDist * (dir == Direction.Right ? 1 : -1));
+                    
+                    // すでに十分に離れている場合は動かさない
+                    bool needsPush = (dir == Direction.Right) ? (other.transform.position.x < newX) : (other.transform.position.x > newX);
+                    if(needsPush)
+                    {
+                        other.transform.position = new Vector3(newX, other.transform.position.y, other.transform.position.z);
+                        // 再帰的に後ろのアバターもチェックするために再度lastXを更新してループ
+                        lastX = newX;
+                    }
+                }
+            }
         }
 
-        private void AddChildrenRecursive(GameObject obj, List<GameObject> list)
+        private List<GameObject> FindAllAvatars()
         {
-            list.Add(obj);
-            for (int i = 0; i < obj.transform.childCount; i++)
+            var result = new List<GameObject>();
+            var allObjects = GameObject.FindObjectsOfType<GameObject>();
+            foreach (var obj in allObjects)
             {
-                AddChildrenRecursive(obj.transform.GetChild(i).gameObject, list);
+                if (IsAvatar(obj)) result.Add(obj);
             }
+            return result;
+        }
+
+        private bool IsAvatar(GameObject obj)
+        {
+            if (obj == null) return false;
+#if VRC_SDK_VRCSDK3
+            return obj.GetComponent<VRCAvatarDescriptor>() != null;
+#else
+            // SDKがない場合は名前やAnimatorなどの汎用的な判定をフォールバックとして置くことも可能
+            // 今回は既存ロジック維持のためVRC判定を優先
+            return obj.name.Contains("Avatar") || obj.GetComponent<Animator>() != null;
+#endif
         }
     }
 }
-#endif
